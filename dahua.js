@@ -191,8 +191,13 @@ dahua.prototype.ptzPreset = function (preset) {
     return 0;
   }
   preset = parseInt(preset)
-  request(this.baseUri + '/cgi-bin/ptz.cgi?action=start&channel=0&code=GotoPreset&arg1=0&arg2=' + preset + '&arg3=0', function (error, response, body) {
+  // console.log(this.camUser, this.camPass, this.baseUri + '/cgi-bin/ptz.cgi?action=start&channel=0&code=GotoPreset&arg1=0&arg2=' + preset + '&arg3=0')
+  request({
+    timeout: 10000,
+    url: this.baseUri + '/cgi-bin/ptz.cgi?action=start&channel=0&code=GotoPreset&arg1=0&arg2=' + preset + '&arg3=0'
+  }, function (error, response, body) {
     if ((error) || (response.statusCode !== 200) || (body.trim() !== "OK")) {
+      console.log(error, response.statusCode, response.statusMessage, body);
       self.emit("error", 'FAILED TO ISSUE PTZ PRESET');
     }
   }).auth(this.camUser,this.camPass,false);
@@ -743,64 +748,78 @@ dahua.prototype.getSnapshot = function (options) {
 
   var saveTo = path.join(opts.path,opts.filename);
   var deletefile = false;
+  try {
+    var file = fs.createWriteStream(saveTo);
+    file.on('error', err => {
+      console.error('file open error', err);
+    });
 
-  var file = fs.createWriteStream(saveTo);
+    file.on('finish',()=> {
+      if(deletefile) {
+        self.emit("getSnapshot", { 'status':"FAIL ECONNRESET or 0 byte recieved." });
+        console.log(moment().format(),'FAIL ECONNRESET or 0 byte recieved. Deleting ',saveTo);
+        fs.unlink(saveTo, (err) => {
+          // if (err) throw err;
+        });
+      }
+    });
 
-  file.on('finish',()=> {
-    if(deletefile) {
-      self.emit("getSnapshot", { 'status':"FAIL ECONNRESET or 0 byte recieved." });
-      console.log(moment().format(),'FAIL ECONNRESET or 0 byte recieved. Deleting ',saveTo);
-      fs.unlink(saveTo, (err) => {
-        if (err) throw err;
-      });
-    }
-  });
+    var ropts = {
+      'uri' : this.baseUri + '/cgi-bin/snapshot.cgi?' + opts.channel,
+    };
 
-  var ropts = {
-    'uri' : this.baseUri + '/cgi-bin/snapshot.cgi?' + opts.channel,
-  };
+    var responseBody = [];
+    var responseHeaders = [];
 
-  var responseBody = [];
-  var responseHeaders = [];
+    request(ropts)
+    .auth(this.camUser,this.camPass,false)
+    .on('data', (chunk) => {
+      responseBody.push(chunk);
+    })
+    .on('response',function (response) {
+      responseHeaders = response.headers;
+    })
+    .on('end',function(){
+      responseBody = Buffer.concat(responseBody);
+      responseBodyLength = Buffer.byteLength(responseBody);
 
-  request(ropts)
-  .auth(this.camUser,this.camPass,false)
-  .on('data', (chunk) => {
-    responseBody.push(chunk);
-  })
-  .on('response',function (response) {
-    responseHeaders = response.headers;
-  })
-  .on('end',function(){
-    responseBody = Buffer.concat(responseBody);
-    responseBodyLength = Buffer.byteLength(responseBody);
+      // check if content-length header matches actual recieved length
+      if( responseHeaders['content-length'] != responseBodyLength) {
+        self.emit("getSnapshot", {status: "WARNING content-length missmatch"} );
+      }
 
-    // check if content-length header matches actual recieved length
-    if( responseHeaders['content-length'] != responseBodyLength) {
-      self.emit("getSnapshot", "WARNING content-length missmatch" );
-    }
+      // empty?
+      if(responseHeaders['content-length'] == 0 ) {
+        console.log(moment().format(),'NOT OK content-length 0');
+        deletefile = true;
+        try {
+          file.end();
+        } catch (e) {
+          console.error('err1', e);
+        }
 
-    // empty?
-    if(responseHeaders['content-length'] == 0 ) {
-      console.log(moment().format(),'NOT OK content-length 0');
+      } else {
+
+        // console.log(moment().format(),'OK content-length',responseBodyLength);
+        deletefile = false;
+        self.emit("getSnapshot", {'status':'DONE', filename: saveTo});
+
+      }
+
+    })
+    .on('error',function(error){
+      self.emit("error", 'ERROR ON SNAPSHOT - ' + error.code );
       deletefile = true;
-      file.end();
-
-    } else {
-
-      // console.log(moment().format(),'OK content-length',responseBodyLength);
-      deletefile = false;
-      self.emit("getSnapshot", {'status':'DONE',});
-
-    }
-
-  })
-  .on('error',function(error){
-    self.emit("error", 'ERROR ON SNAPSHOT - ' + error.code );
-    deletefile = true;
-    file.end();
-  })
-  .pipe(file);
+      try {
+        file.end();
+      } catch (e) {
+        console.error('err2', e);
+      }
+    })
+    .pipe(file);
+  } catch (e) {
+    self.emit("error", 'Unhandled error' + error.code);
+  }
 
 };
 
